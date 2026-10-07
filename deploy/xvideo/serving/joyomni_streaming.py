@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from diffusers.utils.torch_utils import randn_tensor
 from einops import rearrange
-from PIL import Image
+from PIL import Image, ImageOps
 
 from xvideo.config import ExpConfig, generate_video_image_bucket
 from xvideo.models.models import load_dit, load_pipeline, build_vae
@@ -88,6 +88,8 @@ class StreamingSettings:
     store_clean_self_only: bool = True
     profile_timings: bool = False
     output_codec: str = "mjpeg"
+    output_height: int | None = None
+    output_width: int | None = None
 
 @dataclass
 class StreamingChunkResult:
@@ -304,6 +306,9 @@ class JoyOmniRuntime:
             pipeline.set_progress_bar_config(disable=True)
         pipeline.transformer.eval()
 
+        warmup_align = pipeline.vae.stem.stride * 8
+        warmup_height = (warmup_height + warmup_align - 1) // warmup_align * warmup_align
+        warmup_width = (warmup_width + warmup_align - 1) // warmup_align * warmup_align
         _orientations = [(warmup_height, warmup_width)]
         if (warmup_width, warmup_height) != (warmup_height, warmup_width):
             _orientations.append((warmup_width, warmup_height))
@@ -323,6 +328,7 @@ class JoyOmniRuntime:
                         decode_vae, _lat_c,
                         _ch // _fspa, _cw // _fspa,
                         device=_ddev, dtype=_ddt,
+                        input_dtype=torch.float32,
                     )
         except Exception as _vc_exc:
             print(f"#####[STREAM] VAE compile warmup skipped: {_vc_exc!r}")
@@ -1795,6 +1801,8 @@ class JoyOmniV2VStreamingSession:
         post_device = self.postprocess_device
 
         chunk_decoded = decoded_pixels.to(device=post_device, dtype=torch.float32)
+        if self.settings.output_height and self.settings.output_width:
+            chunk_decoded = chunk_decoded[..., :self.settings.output_height, :self.settings.output_width]
         frames_u8 = (
             (chunk_decoded / 2 + 0.5)
             .clamp(0, 1)
@@ -1857,6 +1865,10 @@ class JoyOmniV2VStreamingSession:
 
     def _resize_frame(self, frame: Image.Image) -> Image.Image:
         frame = frame.convert("RGB")
+        if self.settings.output_width and self.settings.output_height:
+            frame = ImageOps.fit(frame, (self.settings.output_width, self.settings.output_height))
+            return ImageOps.expand(frame, border=(0, 0,
+                self.settings.width - frame.width, self.settings.height - frame.height))
         if frame.size == (self.settings.width, self.settings.height):
             return frame
         resampling = getattr(Image, "Resampling", Image).BICUBIC

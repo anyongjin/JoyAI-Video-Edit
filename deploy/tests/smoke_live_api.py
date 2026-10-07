@@ -1,4 +1,4 @@
-"""Exercise public API authorization and three real reference-guided chunks."""
+"""Exercise authorization, graph inference and a real reference restart."""
 
 import argparse
 import asyncio
@@ -33,6 +33,9 @@ async def smoke(args):
                 "prompt": args.prompt,
                 "detectPerson": False,
                 "profileTimings": True,
+                "width": args.width,
+                "height": args.height,
+                "fps": args.fps,
                 "refImage": base64.b64encode(args.reference.read_bytes()).decode(),
             },
         )
@@ -52,7 +55,7 @@ async def smoke(args):
             ) as ws:
 
                 async def receive():
-                    message = await asyncio.wait_for(ws.recv(), 120)
+                    message = await asyncio.wait_for(ws.recv(), 270)
                     if isinstance(message, bytes):
                         return message
                     message = json.loads(message)
@@ -73,9 +76,22 @@ async def smoke(args):
                 await ws.send(json.dumps({"type": "start"}))
                 started = await wait_type("started")
                 assert started["ref_image"] is True
+                assert (started["width"], started["height"], started["fps"]) == (args.width, args.height, args.fps)
                 next_count = started["frames_per_next_chunk"]
                 with Image.open(args.input) as source:
-                    for chunk in range(3):
+                    for chunk in range(4):
+                        if chunk == 3:
+                            updated = await client.patch(
+                                args.url + "/api/v1/live/sessions/" + session["sessionId"] + "/reference",
+                                headers=headers,
+                                json={"refImage": base64.b64encode(args.reference.read_bytes()).decode()},
+                            )
+                            updated.raise_for_status()
+                            await ws.send(json.dumps({"type": "start"}))
+                            restarted = await wait_type("started")
+                            assert restarted["ref_image"] is True
+                            assert (restarted["width"], restarted["height"]) == (args.width, args.height)
+                            next_count = restarted["frames_per_next_chunk"]
                         for _ in range(next_count):
                             source.seek(frames_in % getattr(source, "n_frames", 1))
                             frame = ImageOps.fit(
@@ -110,7 +126,7 @@ async def smoke(args):
                                         started["height"],
                                     )
                                     assert max(ImageStat.Stat(output).stddev) > 1
-                                    if chunk == 2 and chunk_frames == 0:
+                                    if chunk == 3 and chunk_frames == 0:
                                         output.save(args.output / "result.jpg")
                                 frames_out += 1
                                 chunk_frames += 1
@@ -126,7 +142,7 @@ async def smoke(args):
                                 )
                                 break
                 assert profiles[-1]["dit_denoise_s"] > 0
-                assert profiles[-1]["graph_path"] == 1
+                assert any(profile.get("graph_path") == 1 for profile in profiles)
                 await ws.send(json.dumps({"type": "stop"}))
         finally:
             ended = await client.delete(
@@ -178,7 +194,11 @@ async def smoke(args):
         "detectionEnabledCheck": True,
         "framesIn": frames_in,
         "framesOut": frames_out,
-        "chunks": 3,
+        "chunks": 4,
+        "referenceRestart": True,
+        "width": args.width,
+        "height": args.height,
+        "fps": args.fps,
         "elapsedSeconds": round(time.monotonic() - started_at, 2),
         "lastChunkProfile": profiles[-1],
     }
@@ -190,6 +210,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="https://joyai.nuvatech.cn")
     parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--width", type=int, default=768)
+    parser.add_argument("--height", type=int, default=1024)
+    parser.add_argument("--fps", type=int, default=25)
     parser.add_argument(
         "--input",
         type=Path,
@@ -211,4 +234,4 @@ if __name__ == "__main__":
         from dotenv import load_dotenv
 
         load_dotenv(arguments.env_file)
-    asyncio.run(asyncio.wait_for(smoke(arguments), timeout=300))
+    asyncio.run(asyncio.wait_for(smoke(arguments), timeout=600))

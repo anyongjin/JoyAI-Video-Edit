@@ -41,7 +41,7 @@ bash deploy.sh tunnel
 | PyTorch / torchvision | 2.9.1+cu128 / 0.24.1+cu128 |
 | CUDA / nvcc | CUDA 12.8；nvcc 12.8.93 |
 | Transformers / Diffusers | 4.57.6 / 0.36.0 |
-| 推理 | FP8 image/text、CUDA Graph、cuDNN attention、1248×720、目标16 FPS |
+| 推理 | FP8 image/text、CUDA Graph、cuDNN attention；实时试穿默认768×1024、采集目标25 FPS |
 | 持久盘 | 推荐至少200GB；核心权重约51GB，另需环境、wheel、编译缓存和录制空间 |
 | 内存 | 推荐至少100GB可用容器内存；以容器限额为准，不以宿主机 `free` 数字为准 |
 | 网络 | 下载阶段需访问清华/阿里云镜像、ModelScope、Hugging Face、GitHub |
@@ -149,7 +149,7 @@ nginx -t
 9. 发送17帧真实输入，验证3个输出块、非空720p JPEG、正数DiT耗时和第三块CUDA Graph执行，再检查健康。
 
 SageAttention和FA4没有安装：官方在PRO 6000上推荐普通cuDNN。
-上游demo代码保持不变；自动启动与网络配置均放在 `deploy/ops/`。
+实时试穿接入修改了 serving API、流处理尺寸及启动预热；自动启动与网络配置放在 `deploy/ops/`。
 YOLO导出使用独立venv，继承主环境PyTorch，新增依赖只安装在导出环境中：
 `ultralytics==8.4.39`、`onnx==1.19.1`、`onnxslim==0.1.71`、`onnxruntime==1.23.2`、
 `opencv-python==4.13.0.92`，并沿用主环境版本约束。
@@ -182,6 +182,43 @@ YOLO使用[Ultralytics AGPL-3.0许可证](https://github.com/ultralytics/ultraly
   官方最高公布单卡基准为B200 720p/30FPS，PRO 6000为720p/16FPS；这些不是本次端到端持续性能测试。
 
 ## 7. 文件与验证范围
+
+### 实时试穿 API
+
+在已有 GPU 部署上运行 `python3 deploy/enable_api.py`，会备份并上传 API、
+WebSocket 服务及推理流模块，然后重启独立服务；不重新安装模型或依赖。
+私钥从 `/root/autodl-tmp/joyai-api.key` 读取，仅供业务后端使用。
+
+`POST /api/v1/live/sessions` 接受 `prompt`、`refImage`（Base64）及以下参数：
+
+| 参数 | 默认 | 范围 |
+|---|---|---|
+| `width` / `height` | 768 / 1024 | 各 64–2048，总像素不超过 1,048,576 |
+| `fps` | 25 | 1–60，采集发送目标，非推理吞吐保证 |
+| `numInferenceSteps` | 2 | 1–4 |
+| `outputQuality` | 85 | 1–100，JPEG 质量 |
+| `detectPerson` | false | 人物检测开关 |
+
+输入中心裁剪至请求尺寸后，在右侧和底部补齐 VAE 的 24 像素对齐；
+输出编码前移除补齐像素。`started.width/height` 与 JPEG 均为请求精确尺寸，
+`model_width/model_height` 是内部尺寸，例如 768×1024 对应 768×1032。
+服务启动时预热该默认尺寸，首次使用其他尺寸可能触发额外编译。
+
+`PATCH /api/v1/live/sessions/{id}/reference` 接受 `{"refImage":"<base64>"}`，
+要求 API Key。暂停发帧并更新成功后，在同一 WebSocket 发送 `start`，
+等待 `started` 后继续发帧；原会话期限不变。整套、单品和指定图片由业务
+后端校验权限后转换为参考图，GPU 接口不接收业务 ID。
+
+验收命令：
+
+```bash
+python3 deploy/tests/smoke_live_api.py --env-file /path/to/private.env
+```
+
+该检查验证鉴权、三块实际输出、精确竖版尺寸、同一连接参考图更新及人物检测。
+在已安装 JoyAI 依赖的 GPU 环境中运行 `python3 deploy/tests/check_stream_geometry.py`，
+无需加载权重即可验证三个竖版档位的裁剪、补齐区域去除和 float32 解码预热输入。
+解码预热的输入类型与 CUDA Graph 输出一致，避免在首个实际视频块中重新编译。
 
 本目录只保留部署脚本、说明、版本约束、校验清单和本地检查。
 源码、默认验收输入和网页参考图由官方固定Git提交提供；ONNX由官方权重现场导出。

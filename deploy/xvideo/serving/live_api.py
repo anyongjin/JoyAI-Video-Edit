@@ -13,7 +13,13 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+def model_dimensions(width: int, height: int, align: int) -> tuple[int, int]:
+    if not (64 <= width <= 2048 and 64 <= height <= 2048) or width * height > 1024 * 1024:
+        raise ValueError("Stream dimensions exceed the supported one-megapixel budget")
+    return ((width + align - 1) // align * align, (height + align - 1) // align * align)
 
 
 class CreateSession(BaseModel):
@@ -22,10 +28,22 @@ class CreateSession(BaseModel):
     refImage: str | None = Field(default=None, max_length=8 * 1024 * 1024)
     detectPerson: bool = False
     outputCodec: Literal["mjpeg", "h264"] = "mjpeg"
-    width: int = Field(default=1248, ge=64, le=2048)
-    height: int = Field(default=720, ge=64, le=2048)
+    width: int = Field(default=768, ge=64, le=2048)
+    height: int = Field(default=1024, ge=64, le=2048)
+    fps: int = Field(default=25, ge=1, le=60)
     numInferenceSteps: int = Field(default=2, ge=1, le=4)
+    outputQuality: int = Field(default=85, ge=1, le=100)
     profileTimings: bool = False
+
+    @model_validator(mode="after")
+    def check_dimensions(self):
+        model_dimensions(self.width, self.height, 1)
+        return self
+
+
+class UpdateReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    refImage: str = Field(min_length=1, max_length=8 * 1024 * 1024)
 
 
 def api_key() -> str:
@@ -88,7 +106,9 @@ def install_live_api(app: FastAPI, stream_handler) -> None:
                 "use_pe": False,
                 "width": body.width,
                 "height": body.height,
+                "fps": body.fps,
                 "num_inference_steps": body.numInferenceSteps,
+                "output_quality": body.outputQuality,
                 "profile_timings": body.profileTimings,
                 "input_codec": "mjpeg",
                 "output_codec": body.outputCodec,
@@ -112,10 +132,26 @@ def install_live_api(app: FastAPI, stream_handler) -> None:
             "websocketUrl": url,
             "expiresAt": row["expiresAt"],
             "detectPerson": body.detectPerson,
+            "width": body.width,
+            "height": body.height,
+            "fps": body.fps,
             "transport": "websocket",
             "inputCodec": "mjpeg",
             "outputCodec": body.outputCodec,
         }
+
+    @app.patch("/api/v1/live/sessions/{session_id}/reference")
+    async def update_reference(session_id: str, body: UpdateReference, request: Request):
+        owner = authorize(request)
+        row = sessions.get(session_id)
+        if not row or row["owner"] != owner or row["expiresAt"] <= time.time():
+            raise HTTPException(404, "Session not found")
+        await asyncio.to_thread(validate_reference, body.refImage)
+        if sessions.get(session_id) is not row:
+            raise HTTPException(404, "Session not found")
+        # The active socket shares this dict; its next start resets model history.
+        row["start"]["ref_image"] = body.refImage
+        return {"status": "updated"}
 
     @app.delete("/api/v1/live/sessions/{session_id}")
     async def end(session_id: str, request: Request):
@@ -125,7 +161,10 @@ def install_live_api(app: FastAPI, stream_handler) -> None:
             raise HTTPException(404, "Session not found")
         sessions.pop(session_id)
         if row["socket"] is not None:
-            await row["socket"].close(code=1000)
+            try:
+                await row["socket"].close(code=1000)
+            except RuntimeError:
+                pass  # The browser may already have closed the ASGI socket.
         return {"status": "ended"}
 
     @app.websocket("/api/v1/live/sessions/{session_id}/ws", name="joyai_api_socket")

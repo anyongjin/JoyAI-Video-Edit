@@ -143,13 +143,14 @@ def warmup_encode_dynamic(vae, in_channels: int, hw_list, device: torch.device,
 def warmup_decode(vae, latent_channels: int, h_lat: int, w_lat: int,
                   device: torch.device, dtype: torch.dtype,
                   temporal_lens: tuple[int, ...] = (1, 2),
-                  autocast: bool = True) -> None:
+                  autocast: bool = True,
+                  input_dtype: torch.dtype | None = None) -> None:
     maybe_setup_decode(vae)
     from contextlib import nullcontext
     dev_type = torch.device(device).type
     use_ac = autocast and dev_type in {"cuda", "cpu"}
     for t in temporal_lens:
-        z = torch.zeros(1, latent_channels, t, h_lat, w_lat, device=device, dtype=dtype)
+        z = torch.zeros(1, latent_channels, t, h_lat, w_lat, device=device, dtype=input_dtype or dtype)
         z = prep_input(z)
         ctx = (
             torch.autocast(device_type=dev_type, dtype=dtype, enabled=True)

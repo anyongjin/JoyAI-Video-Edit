@@ -125,10 +125,6 @@ def _decode_ref_image(value: str | None) -> Image.Image | None:
     return _decode_image(base64.b64decode(data))
 
 
-def _snap_to_align(value: int, align: int) -> int:
-    return max(align, (value + align // 2) // align * align)
-
-
 class _H264Stream:
     def __init__(self, quality: int) -> None:
         self._lock = threading.Lock()
@@ -1318,7 +1314,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     raise RuntimeError(app.state.runtime_error)
                 if output_task is not None and output_task.done():
                     output_task.result()
-                if frames_out != last_frames_out or pe_task is not None:
+                if (
+                    frames_out != last_frames_out
+                    or pe_task is not None
+                    or (session is not None and session.inflight_chunks() > 0)
+                ):
                     last_frames_out = frames_out
                     last_activity = time.monotonic()
                 if time.monotonic() - last_activity >= HOLDER_IDLE_TIMEOUT_S:
@@ -1472,15 +1472,16 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         _align = runtime.pipeline.vae.stem.stride * 8
                         _req_h = int(payload.get("height", args.height))
                         _req_w = int(payload.get("width", args.width))
-                        _long = _snap_to_align(max(args.height, args.width), _align)
-                        _short = _snap_to_align(min(args.height, args.width), _align)
-                        if _req_h > _req_w:
-                            _sh, _sw = _long, _short
-                        else:
-                            _sh, _sw = _short, _long
+                        try:
+                            _sw, _sh = model_dimensions(_req_w, _req_h, _align)
+                        except ValueError as exc:
+                            await _send_json({"type": "error", "message": str(exc)})
+                            continue
                         session_settings = StreamingSettings(
                             height=_sh,
                             width=_sw,
+                            output_height=_req_h,
+                            output_width=_req_w,
                             num_inference_steps=int(payload.get("num_inference_steps", args.num_inference_steps)),
                             seed=int(payload.get("seed", args.seed)),
                             max_temporal_ids=max_temporal_ids,
@@ -1510,8 +1511,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             {
                                 "type": "started",
                                 "frames_per_next_chunk": session.frames_per_next_chunk,
-                                "height": session_settings.height,
-                                "width": session_settings.width,
+                                "height": _req_h,
+                                "width": _req_w,
+                                "model_height": session_settings.height,
+                                "model_width": session_settings.width,
+                                "fps": _gate_fps,
                                 "output_codec": output_codec,
                                 "input_codec": input_codec,
                                 "ref_image": ref_image is not None,
@@ -1988,7 +1992,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 if ticket is not None:
                     app.state.session_gate.release(ticket)
 
-    from xvideo.serving.live_api import install_live_api
+    from xvideo.serving.live_api import install_live_api, model_dimensions
 
     install_live_api(app, websocket_endpoint)
     return app

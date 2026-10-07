@@ -19,6 +19,8 @@ def main():
     subprocess.run(ssh + [f"mkdir -p {remote}/deploy/api-staging"], check=True)
     for source, target in [
         (root / "xvideo/serving/live_api.py", "live_api.py"),
+        (root / "xvideo/serving/joyomni_streaming.py", "joyomni_streaming.py"),
+        (root / "xvideo/models/vae/vae_compile.py", "vae_compile.py"),
         (
             root / "xvideo/serving/serve_joyomni_streaming.py",
             "serve_joyomni_streaming.py",
@@ -60,12 +62,20 @@ def main():
         os.chmod(env, 0o600)
     activate = f"""set -eu
 cd {remote}/deploy
-cp -p xvideo/serving/serve_joyomni_streaming.py api-staging/serve_joyomni_streaming.before-api.py
-cp -p ops/serve.sh api-staging/serve.before-api.sh
+backup=api-staging/backup-$(date +%Y%m%dT%H%M%S)
+mkdir -p "$backup"
+for file in live_api.py serve_joyomni_streaming.py joyomni_streaming.py; do
+    if [ -f xvideo/serving/$file ]; then cp -p xvideo/serving/$file "$backup/$file"; fi
+done
+cp -p xvideo/models/vae/vae_compile.py "$backup/vae_compile.py"
+cp -p ops/serve.sh "$backup/serve.sh"
+/root/autodl-tmp/joyai-env/bin/python -m py_compile api-staging/live_api.py api-staging/serve_joyomni_streaming.py api-staging/joyomni_streaming.py api-staging/vae_compile.py
 cp api-staging/live_api.py xvideo/serving/live_api.py
 cp api-staging/serve_joyomni_streaming.py xvideo/serving/serve_joyomni_streaming.py
+cp api-staging/joyomni_streaming.py xvideo/serving/joyomni_streaming.py
+cp api-staging/vae_compile.py xvideo/models/vae/vae_compile.py
 cp api-staging/serve.sh ops/serve.sh
-/root/autodl-tmp/joyai-env/bin/python -m py_compile xvideo/serving/live_api.py xvideo/serving/serve_joyomni_streaming.py
+/root/autodl-tmp/joyai-env/bin/python -m py_compile xvideo/serving/live_api.py xvideo/serving/serve_joyomni_streaming.py xvideo/serving/joyomni_streaming.py xvideo/models/vae/vae_compile.py
 /usr/bin/supervisord ctl -s http://127.0.0.1:19090 restart joyai-demo
 """
     subprocess.run(ssh + [activate], check=True)
