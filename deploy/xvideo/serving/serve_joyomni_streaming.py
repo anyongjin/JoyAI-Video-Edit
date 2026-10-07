@@ -795,7 +795,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
-        await websocket.accept()
+        await websocket.accept(subprotocol=getattr(websocket.state, "api_subprotocol", None))
         runtime = get_runtime()
         session = None
         ticket = None
@@ -1339,6 +1339,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 if "text" in message and message["text"] is not None:
                     payload = json.loads(message["text"])
                     msg_type = payload.get("type")
+                    if msg_type == "start" and hasattr(websocket.state, "api_start"):
+                        payload = {"type": "start", **websocket.state.api_start}
                     if msg_type != "start" and payload.get("session_id", session_id) != session_id:
                         continue
                     if msg_type == "start":
@@ -1986,6 +1988,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 if ticket is not None:
                     app.state.session_gate.release(ticket)
 
+    from xvideo.serving.live_api import install_live_api
+
+    install_live_api(app, websocket_endpoint)
     return app
 
 def build_parser() -> argparse.ArgumentParser:

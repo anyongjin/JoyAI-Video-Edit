@@ -1,0 +1,12 @@
+https://modelscope.cn/models/XiaomiMiMo/MiMo-VL-7B-RL-2508/resolve/master/model-00001-of-00004.safetensors
+  out=model-00001-of-00004.safetensors
+  checksum=sha-256=f93e07524d843d63c080eef4fd43d7c5b98ac7a17e8c56e48edfe89297d6bff3
+https://modelscope.cn/models/XiaomiMiMo/MiMo-VL-7B-RL-2508/resolve/master/model-00002-of-00004.safetensors
+  out=model-00002-of-00004.safetensors
+  checksum=sha-256=9715248b5ff4357d2deb23669c83131f35934c981e88f648a9769976e533412e
+https://modelscope.cn/models/XiaomiMiMo/MiMo-VL-7B-RL-2508/resolve/master/model-00003-of-00004.safetensors
+  out=model-00003-of-00004.safetensors
+  checksum=sha-256=5b8db223f443f8ed88b65017c65aaa9e201e386b942676e75bf1651202e2181f
+https://modelscope.cn/models/XiaomiMiMo/MiMo-VL-7B-RL-2508/resolve/master/model-00004-of-00004.safetensors
+  out=model-00004-of-00004.safetensors
+  checksum=sha-256=8bcbeaac2b402096c0629435395003fa66eb14dfba682d3af02b4398001f5b0f

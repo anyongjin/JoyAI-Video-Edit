@@ -118,6 +118,8 @@ deploy/deps/checkpoints/JoyAI-Video-Edit/
 
 ## 🚀 Quick Start
 
+RTX PRO 6000 Blackwell 的可重复部署脚本、SSH端口转发、公网HTTPS配置和中文运维文档见 [deploy/kit/README.md](deploy/kit/README.md)，原始文件直接存放在 `deploy/kit/` 中。
+
 ### 1. Install
 
 ```bash
@@ -146,6 +148,10 @@ http://localhost:8080
 ```
 
 The server binds `0.0.0.0:8080` by default — for remote machines, just open the port (or use SSH port forwarding).
+
+## Live Editing API
+
+Key-authorized streaming sessions and the outfit_agent JoyAI provider are documented in [API.md](API.md). The existing public demo remains available.
 
 ## 📚 Citation
 
