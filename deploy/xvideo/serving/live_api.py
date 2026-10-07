@@ -90,7 +90,7 @@ def install_live_api(app: FastAPI, stream_handler) -> None:
         for sid, row in list(sessions.items()):
             if row["expiresAt"] <= now and not row["active"]:
                 sessions.pop(sid)
-        if len(sessions) >= 64:
+        if sessions:
             raise HTTPException(429, "Session capacity reached")
         sid, token = secrets.token_hex(16), secrets.token_urlsafe(32)
         row = {
@@ -159,7 +159,8 @@ def install_live_api(app: FastAPI, stream_handler) -> None:
         row = sessions.get(session_id)
         if not row or row["owner"] != owner:
             raise HTTPException(404, "Session not found")
-        sessions.pop(session_id)
+        if not row["active"]:
+            sessions.pop(session_id)
         if row["socket"] is not None:
             try:
                 await row["socket"].close(code=1000)

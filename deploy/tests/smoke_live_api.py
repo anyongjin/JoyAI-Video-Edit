@@ -41,6 +41,8 @@ async def smoke(args):
         )
         response.raise_for_status()
         session = response.json()
+        busy = await client.post(args.url + "/api/v1/live/sessions", headers=headers, json={"prompt": args.prompt})
+        assert busy.status_code == 429, "only one GPU session may be reserved at a time"
         assert session["websocketUrl"].startswith("wss://")
         args.output.mkdir(parents=True, exist_ok=True)
         frames_in = frames_out = 0
@@ -196,6 +198,7 @@ async def smoke(args):
         "framesOut": frames_out,
         "chunks": 4,
         "referenceRestart": True,
+        "concurrentSessionRejected": True,
         "width": args.width,
         "height": args.height,
         "fps": args.fps,

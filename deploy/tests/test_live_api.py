@@ -51,6 +51,7 @@ def test_key_sessions_and_optional_detection(monkeypatch):
             response = client.post("/api/v1/live/sessions", headers=headers, json=body)
             assert response.status_code == 201
             session = response.json()
+            assert client.post("/api/v1/live/sessions", headers=headers, json=body).status_code == 429
             assert session["detectPerson"] is detection
             path = f"/api/v1/live/sessions/{session['sessionId']}/ws"
             with pytest.raises(WebSocketDisconnect):
@@ -147,3 +148,4 @@ def test_end_session_tolerates_socket_already_closed(monkeypatch):
         ended = client.delete("/api/v1/live/sessions/" + session["sessionId"], headers=headers)
         assert ended.status_code == 200
         assert session["sessionId"] not in app.state.api_sessions
+        assert client.post("/api/v1/live/sessions", headers=headers, json={"prompt": "edit"}).status_code == 201

@@ -15,6 +15,25 @@ _configured_encode: set[int] = set()
 _configured_encode_dynamic: set[int] = set()
 
 
+def _compile_warmed(core):
+    compiled = torch.compile(core, mode="max-autotune-no-cudagraphs", dynamic=False)
+    warmed = set()
+
+    def dispatch(tensor, *args, **kwargs):
+        signature = (tuple(tensor.shape), tensor.stride(), tensor.dtype, tensor.device,
+                     torch.is_grad_enabled(), torch.is_autocast_enabled())
+        # A cold compile cannot be cancelled when a camera session disconnects.
+        if dispatch._warming or signature in warmed:
+            result = compiled(tensor, *args, **kwargs)
+            warmed.add(signature)
+            return result
+        return core(tensor, *args, **kwargs)
+
+    dispatch._warming = False
+    dispatch._torchdynamo_orig_callable = core
+    return dispatch
+
+
 def maybe_setup_decode(vae) -> None:
     if id(vae) in _configured:
         return
@@ -24,10 +43,10 @@ def maybe_setup_decode(vae) -> None:
             m.weight.data = m.weight.data.to(memory_format=torch.channels_last_3d)
             n_conv += 1
     if hasattr(vae, "_decode"):
-        vae._decode = torch.compile(vae._decode, mode="max-autotune-no-cudagraphs", dynamic=False)
+        vae._decode = _compile_warmed(vae._decode)
         target = "_decode"
     elif hasattr(vae, "decode"):
-        vae.decode = torch.compile(vae.decode, mode="max-autotune-no-cudagraphs", dynamic=False)
+        vae.decode = _compile_warmed(vae.decode)
         target = "decode"
     else:
         raise RuntimeError("VAE has neither _decode nor decode; cannot compile")
@@ -48,10 +67,10 @@ def maybe_setup_encode(vae) -> None:
             m.weight.data = m.weight.data.to(memory_format=torch.channels_last_3d)
             n_conv += 1
     if hasattr(vae, "_encode"):
-        vae._encode = torch.compile(vae._encode, mode="max-autotune-no-cudagraphs", dynamic=False)
+        vae._encode = _compile_warmed(vae._encode)
         target = "_encode"
     elif hasattr(vae, "encode"):
-        vae.encode = torch.compile(vae.encode, mode="max-autotune-no-cudagraphs", dynamic=False)
+        vae.encode = _compile_warmed(vae.encode)
         target = "encode"
     else:
         raise RuntimeError("VAE has neither _encode nor encode; cannot compile")
@@ -67,6 +86,7 @@ def warmup_encode(vae, in_channels: int, h_px: int, w_px: int,
     from contextlib import nullcontext
     dev_type = torch.device(device).type
     use_ac = autocast and dev_type in {"cuda", "cpu"}
+    core = getattr(vae, "_encode", vae.encode)
     for t in temporal_lens:
         x = torch.zeros(1, in_channels, t, h_px, w_px, device=device, dtype=dtype)
         x = prep_input(x)
@@ -75,6 +95,7 @@ def warmup_encode(vae, in_channels: int, h_px: int, w_px: int,
             if use_ac else nullcontext()
         )
         try:
+            core._warming = True
             with torch.no_grad(), ctx:
                 _ = vae.encode(x)
             if torch.cuda.is_available():
@@ -82,6 +103,8 @@ def warmup_encode(vae, in_channels: int, h_px: int, w_px: int,
             print(f"[vae_compile] warmup compiled encode shape (1,{in_channels},{t},{h_px},{w_px}) autocast={autocast}")
         except Exception as exc:  # noqa: BLE001
             print(f"[vae_compile] encode warmup failed for t={t}: {exc!r}")
+        finally:
+            core._warming = False
 
 
 def maybe_setup_encode_dynamic(vae) -> None:
@@ -93,6 +116,7 @@ def maybe_setup_encode_dynamic(vae) -> None:
         core = getattr(vae, "encode")
     else:
         raise RuntimeError("VAE has neither _encode nor encode; cannot compile")
+    core = getattr(core, "_torchdynamo_orig_callable", core)
     vae._encode_dynamic = torch.compile(core, mode="max-autotune-no-cudagraphs", dynamic=True)
     _configured_encode_dynamic.add(id(vae))
     print("[vae_compile] compiled vae._encode_dynamic (dynamic=True, reference-image path)")
@@ -149,6 +173,7 @@ def warmup_decode(vae, latent_channels: int, h_lat: int, w_lat: int,
     from contextlib import nullcontext
     dev_type = torch.device(device).type
     use_ac = autocast and dev_type in {"cuda", "cpu"}
+    core = getattr(vae, "_decode", vae.decode)
     for t in temporal_lens:
         z = torch.zeros(1, latent_channels, t, h_lat, w_lat, device=device, dtype=input_dtype or dtype)
         z = prep_input(z)
@@ -157,6 +182,7 @@ def warmup_decode(vae, latent_channels: int, h_lat: int, w_lat: int,
             if use_ac else nullcontext()
         )
         try:
+            core._warming = True
             with torch.no_grad(), ctx:
                 _ = vae.decode(z, return_dict=False)[0]
             if torch.cuda.is_available():
@@ -164,3 +190,5 @@ def warmup_decode(vae, latent_channels: int, h_lat: int, w_lat: int,
             print(f"[vae_compile] warmup compiled decode shape (1,{latent_channels},{t},{h_lat},{w_lat}) autocast={autocast}")
         except Exception as exc:  # noqa: BLE001
             print(f"[vae_compile] warmup failed for t={t}: {exc!r}")
+        finally:
+            core._warming = False

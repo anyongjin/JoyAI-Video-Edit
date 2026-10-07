@@ -810,6 +810,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         pe_defer = False
         pe_task: asyncio.Task | None = None
         session_max_inflight = max(0, int(args.max_inflight_chunks or 0))
+        input_credit_mode = False
+        perf_at = time.perf_counter()
+        perf_in = perf_out = perf_chunks = 0
+        perf_gpu_s = perf_send_s = 0.0
 
         gate_state = {"count": 0, "cx": None, "cy": None, "absent": 0,
                       "absent_hold": False, "present": 0, "person_check_i": 0, "person_last": True,
@@ -957,6 +961,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     async with send_lock:
                         await _ws_send_json({
                             "type": "flow_drop",
+                            **({"input_credit": 8} if input_credit_mode else {}),
                             "count": count,
                             "outstanding": _outstanding,
                             "dropped_total": flow["dropped"],
@@ -1059,6 +1064,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
             _chunk_done_msg = {
                 "type": "chunk_done",
+                **({"input_credit": 8} if input_credit_mode else {}),
                 "count": count,
                 "frames_in": frames_in,
                 "frames_out": frames_out,
@@ -1097,13 +1103,30 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             )
 
         async def _output_pump(session_ref) -> None:
-            nonlocal completed_frames
+            nonlocal completed_frames, perf_at, perf_in, perf_out, perf_chunks, perf_gpu_s, perf_send_s
             while not stop_output_pump.is_set():
                 result = await asyncio.to_thread(session_ref.wait_async_result, 0.05)
                 if result is None:
                     continue
+                send_at = time.perf_counter()
                 await _send_chunk_result(result)
+                perf_send_s += time.perf_counter() - send_at
+                perf_gpu_s += float(result.elapsed or 0.0)
+                perf_chunks += 1
                 completed_frames += min(len(result.jpegs), result.valid_count) if result.valid_count is not None else len(result.jpegs)
+                now = time.perf_counter()
+                if now - perf_at >= 5:
+                    seconds = now - perf_at
+                    print(
+                        f"[joyai-perf] session={session_id} size={session_settings.output_width}x{session_settings.output_height} "
+                        f"in_fps={(frames_in - perf_in) / seconds:.1f} out_fps={(frames_out - perf_out) / seconds:.1f} "
+                        f"gpu_chunk_ms={perf_gpu_s * 1000 / perf_chunks:.1f} send_chunk_ms={perf_send_s * 1000 / perf_chunks:.1f} "
+                        f"inflight={session_ref.inflight_chunks()} dropped_input={ws_debug.get('frames_dropped_backpressure', 0)} "
+                        f"dropped_chunks={flow['dropped']}", flush=True,
+                    )
+                    perf_at, perf_in, perf_out = now, frames_in, frames_out
+                    perf_chunks = 0
+                    perf_gpu_s = perf_send_s = 0.0
 
         def _create_session():
             if app.state.runtime_error:
@@ -1288,6 +1311,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     "freeze_kv_on_static": freeze_kv_on_static,
                     "static_diff_thresh": static_diff_thresh,
                     "frames_per_next_chunk": session.frames_per_next_chunk,
+                    **({"input_credit": 9} if input_credit_mode else {}),
                 }
             )
             _start_output_task(session)
@@ -1340,7 +1364,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     payload = json.loads(message["text"])
                     msg_type = payload.get("type")
                     if msg_type == "start" and hasattr(websocket.state, "api_start"):
-                        payload = {"type": "start", **websocket.state.api_start}
+                        payload = {"type": "start", **websocket.state.api_start, "input_flow": payload.get("input_flow")}
                     if msg_type != "start" and payload.get("session_id", session_id) != session_id:
                         continue
                     if msg_type == "start":
@@ -1359,6 +1383,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
                         session_id = str(payload.get("session_id") or uuid.uuid4().hex)
                         frames_in = frames_out = edit_frames = completed_frames = last_frames_out = 0
+                        perf_at = time.perf_counter()
+                        perf_in = perf_out = perf_chunks = 0
+                        perf_gpu_s = perf_send_s = 0.0
+                        input_credit_mode = payload.get("input_flow") == "credit"
                         next_frame_meta = None
                         ws_debug.update(frames_in=0, frames_out=0, output_bytes=0, chunk_results_sent=0,
                                         frames_dropped_backpressure=0, session_id=session_id)
@@ -1400,6 +1428,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         session_max_inflight = max(0, int(
                             payload.get("max_inflight_chunks", args.max_inflight_chunks) or 0
                         ))
+                        if input_credit_mode:
+                            session_max_inflight = 2
                         use_pe = bool(payload.get("use_pe", args.use_pe)) and bool(os.environ.get("OPENAI_API_KEY"))
 
                         entry_gate = bool(payload.get("gate_enabled", True)) and not lossless_mode
@@ -1511,6 +1541,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             {
                                 "type": "started",
                                 "frames_per_next_chunk": session.frames_per_next_chunk,
+                                **({"input_credit": 9} if input_credit_mode else {}),
                                 "height": _req_h,
                                 "width": _req_w,
                                 "model_height": session_settings.height,
@@ -1853,7 +1884,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             f"inference lock timeout after {args.inference_lock_timeout_s:.1f}s"
                         )
                     try:
-                        if not lossless_mode and session_max_inflight and session.inflight_chunks() >= session_max_inflight:
+                        if not lossless_mode and not input_credit_mode and session_max_inflight and session.inflight_chunks() >= session_max_inflight:
                             ws_debug["frames_dropped_backpressure"] = (
                                 int(ws_debug.get("frames_dropped_backpressure", 0)) + 1
                             )
@@ -1872,7 +1903,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
                 try:
                     capacity_deadline = time.monotonic() + max(0.1, float(args.push_frame_timeout_s))
-                    while lossless_mode and session_max_inflight and session.inflight_chunks() >= session_max_inflight:
+                    while (lossless_mode or input_credit_mode) and session_max_inflight and session.inflight_chunks() >= session_max_inflight:
                         _check_output()
                         if time.monotonic() >= capacity_deadline:
                             raise TimeoutError("file input timed out waiting for inference capacity")

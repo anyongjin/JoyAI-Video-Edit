@@ -202,12 +202,26 @@ WebSocket 服务及推理流模块，然后重启独立服务；不重新安装�
 输入中心裁剪至请求尺寸后，在右侧和底部补齐 VAE 的 24 像素对齐；
 输出编码前移除补齐像素。`started.width/height` 与 JPEG 均为请求精确尺寸，
 `model_width/model_height` 是内部尺寸，例如 768×1024 对应 768×1032。
-服务启动时预热该默认尺寸，首次使用其他尺寸可能触发额外编译。
+服务启动时预热该默认尺寸。仅已预热的 VAE 输入形状、类型和执行条件使用编译加速，
+其他尺寸直接使用普通推理，避免会话中首次编译阻塞退出并污染共享 GPU 运行态。
 
 `PATCH /api/v1/live/sessions/{id}/reference` 接受 `{"refImage":"<base64>"}`，
 要求 API Key。暂停发帧并更新成功后，在同一 WebSocket 发送 `start`，
 等待 `started` 后继续发帧；原会话期限不变。整套、单品和指定图片由业务
 后端校验权限后转换为参考图，GPU 接口不接收业务 ID。
+
+API 当前只允许一个预约或活跃会话，额外创建返回 429；退出/过期并完成清理后释放。
+`SessionGate` 继续保证 GPU 推理独占，尚未接入 WebSocket 的预约最多保留 300 秒。
+前端发送 `{"type":"start","input_flow":"credit"}` 可启用有界流水线：
+`started` / `session_reset` 的 `input_credit=9` 用于首帧及下一块预采集，
+`chunk_done` / `flow_drop` 的 `input_credit=8` 累加授权后续输入。
+最多两块推理在途，等待容量而不丢弃已授权输入；不要将 `next_chunk_needs` 当作额度重置。
+未声明该模式的客户端继续使用原有 `frames_per_next_chunk` / `next_chunk_needs`。
+
+每 5 秒的 `[joyai-perf]` 日志包含输入/输出 FPS、GPU 块耗时、发送耗时及丢帧数。
+480×640、2 步的稳态实测约 272 ms / 8 帧；推理期间 `nvidia-smi` 多次达到 99–100%。
+性能测试保持 `profileTimings=false`，详细 CUDA 同步计时仅用于分阶段诊断。
+浏览器播放与业务转发也使用相同日志标记，可对照识别浏览器、网络或模型瓶颈。
 
 验收命令：
 
@@ -215,10 +229,16 @@ WebSocket 服务及推理流模块，然后重启独立服务；不重新安装�
 python3 deploy/tests/smoke_live_api.py --env-file /path/to/private.env
 ```
 
-该检查验证鉴权、三块实际输出、精确竖版尺寸、同一连接参考图更新及人物检测。
+该检查验证鉴权、并发创建拒绝、四块实际输出、CUDA Graph、精确竖版尺寸、同一连接参考图更新及人物检测。
 在已安装 JoyAI 依赖的 GPU 环境中运行 `python3 deploy/tests/check_stream_geometry.py`，
 无需加载权重即可验证三个竖版档位的裁剪、补齐区域去除和 float32 解码预热输入。
 解码预热的输入类型与 CUDA Graph 输出一致，避免在首个实际视频块中重新编译。
+
+`python3 deploy/tests/check_vae_compile.py` 验证预热形状继续使用编译路径，未预热的
+尺寸和类型不触发编译。2026-10-07 测试站曾因 480×640 首帧编译未结束、会话清理
+超时而返回 `Unsafe runtime after finally: TimeoutError(); restart required`，
+前端显示 `joyai_stream_failed`。上述修复已部署，测试站三档分辨率连续开播、结束及
+服务健康检查通过，默认尺寸的 CUDA Graph、参考图重启和人物检测实连检查通过。
 
 本目录只保留部署脚本、说明、版本约束、校验清单和本地检查。
 源码、默认验收输入和网页参考图由官方固定Git提交提供；ONNX由官方权重现场导出。
